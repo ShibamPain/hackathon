@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AgriChain | CropSim & Recommendation</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="background-orbs">
+        <div class="orb orb-1"></div>
+        <div class="orb orb-2"></div>
+        <div class="orb orb-3"></div>
+    </div>
+
+    <div class="app-container">
+        <header class="glass-panel">
+            <h1>AgriChain <span class="accent">CropSim & AI</span></h1>
+            <div class="header-stats" id="blockchain-status">
+                <span class="status-dot"></span> <span id="bc-text">Fabric: Idle</span>
+            </div>
+        </header>
+
+        <main class="dashboard">
+            <!-- Left Sidebar: Controls -->
+            <aside class="controls-panel glass-panel">
+                <h2>Simulation Parameters</h2>
+                <form id="sim-form">
+                    <div class="input-group">
+                        <label for="crop_type">Crop Type (For CropSim only)</label>
+                        <select id="crop_type" name="crop_type">
+                            <option value="rice">Rice</option>
+                            <option value="wheat">Wheat</option>
+                            <option value="maize">Maize</option>
+                            <option value="potato">Potato</option>
+                            <option value="sugarcane">Sugarcane</option>
+                        </select>
+                    </div>
+
+                    <div class="input-group-row">
+                        <div class="input-group">
+                            <label for="temp">Temp (°C) <span class="val-display" id="temp-val">25</span></label>
+                            <input type="range" id="temp" name="temp" min="-10" max="60" step="0.5" value="25" oninput="document.getElementById('temp-val').innerText=this.value">
+                        </div>
+                        <div class="input-group">
+                            <label for="moisture">Moisture (%) <span class="val-display" id="moist-val">70</span></label>
+                            <input type="range" id="moisture" name="moisture" min="0" max="100" step="1" value="70" oninput="document.getElementById('moist-val').innerText=this.value">
+                        </div>
+                    </div>
+
+                    <div class="input-group-row">
+                        <div class="input-group">
+                            <label for="humidity">Humidity (%) <span class="val-display" id="hum-val">60</span></label>
+                            <input type="range" id="humidity" name="humidity" min="0" max="100" step="1" value="60" oninput="document.getElementById('hum-val').innerText=this.value">
+                        </div>
+                        <div class="input-group">
+                            <label for="ph">Soil pH <span class="val-display" id="ph-val">6.5</span></label>
+                            <input type="range" id="ph" name="ph" min="0" max="14" step="0.1" value="6.5" oninput="document.getElementById('ph-val').innerText=this.value">
+                        </div>
+                    </div>
+
+                    <div class="input-group-row">
+                        <div class="input-group">
+                            <label for="N">Nitrogen</label>
+                            <input type="number" id="N" name="N" value="40" min="0">
+                        </div>
+                        <div class="input-group">
+                            <label for="P">Phosphorus</label>
+                            <input type="number" id="P" name="P" value="20" min="0">
+                        </div>
+                        <div class="input-group">
+                            <label for="K">Potassium</label>
+                            <input type="number" id="K" name="K" value="20" min="0">
+                        </div>
+                    </div>
+
+                    <div class="input-group-row">
+                        <div class="input-group">
+                            <label for="rainfall">Rainfall (mm)</label>
+                            <input type="number" id="rainfall" name="rainfall" value="150" min="0">
+                        </div>
+                        <div class="input-group">
+                            <label for="fertilizer">Fertilizer (kg/ha)</label>
+                            <input type="number" id="fertilizer" name="fertilizer" value="10" min="0">
+                        </div>
+                    </div>
+
+                    <div class="btn-group-vertical">
+                        <button type="submit" class="btn-primary" id="btn-sim">Run CropSim (Manual)</button>
+                    </div>
+                </form>
+
+                <div class="divider"></div>
+
+                <h2>AI Crop Recommendation</h2>
+                <div class="iot-panel">
+                    <p class="small-text">Uses current N,P,K,Temp,Humidity,pH,Rainfall.</p>
+                    <div class="btn-group-vertical">
+                        <button class="btn-secondary" id="btn-recommend">Recommend Crop Only</button>
+                        <button class="btn-primary" style="background-color:#f59e0b;" id="btn-full-pipeline">Run Full Pipeline (AI + CropSim)</button>
+                    </div>
+                </div>
+
+                <div class="divider"></div>
+
+                <h2>IoT Sensor Feed (Part B)</h2>
+                <div class="iot-panel">
+                    <p class="small-text">Pull live ESP32 telemetry data.</p>
+                    <div class="input-group">
+                        <input type="text" id="device_id" placeholder="Device ID (e.g. esp01)">
+                    </div>
+                    <button class="btn-secondary" id="btn-auto">Auto Simulate from Sensor</button>
+                </div>
+            </aside>
+
+            <!-- Right Area: Results -->
+            <section class="results-area">
+
+                <!-- NEW: Recommendation Panel -->
+                <div class="rec-card glass-panel" id="rec-panel" style="display: none;">
+                    <h3>AI Crop Recommendation</h3>
+                    <div class="rec-top">
+                        <span class="rec-winner" id="rec-top-crop">--</span>
+                    </div>
+                    <div class="rec-list" id="rec-list-container">
+                        <!-- Filled by JS -->
+                    </div>
+                    <p class="small-text" id="rec-supported-msg"></p>
+                </div>
+
+                <div class="kpi-grid">
+                    <div class="kpi-card glass-panel">
+                        <h3>Predicted Yield</h3>
+                        <div class="kpi-value"><span id="res-yield">--</span> <span class="unit">kg</span></div>
+                        <div class="kpi-subtext" id="res-baseline">Baseline: -- kg</div>
+                        <div class="kpi-subtext" id="res-sim-crop" style="color:var(--accent); font-weight:bold;"></div>
+                    </div>
+                    <div class="kpi-card glass-panel">
+                        <h3>Overall Stress</h3>
+                        <div class="kpi-value"><span id="res-stress">--</span> <span class="unit">%</span></div>
+                        <div class="kpi-subtext">Yield lost to conditions</div>
+                    </div>
+                    <div class="kpi-card glass-panel">
+                        <h3>Sim ID</h3>
+                        <div class="kpi-value" id="res-id">--</div>
+                        <div class="kpi-subtext" id="res-tx">Tx: pending...</div>
+                    </div>
+                </div>
+
+                <div class="chart-container glass-panel">
+                    <h3>90-Day Growth Progression</h3>
+                    <canvas id="growthChart"></canvas>
+                </div>
+
+                <div class="stress-breakdown-container glass-panel">
+                    <h3>Stress Factor Breakdown</h3>
+                    <div class="stress-bars" id="stress-bars">
+                        <!-- Bars injected via JS -->
+                        <p class="placeholder-text">Run a simulation to see breakdown.</p>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
