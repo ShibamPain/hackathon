@@ -9,11 +9,13 @@ No Flask/DB dependency here, same separation-of-concerns pattern as
 stress_engine.py.
 """
 
+import os
 import joblib
 import numpy as np
 
-MODEL_PATH = "crop_recommendation_model.pkl"
-CLASSES_PATH = "crop_recommendation_classes.pkl"
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(_BASE_DIR, "crop_recommendation_model.pkl")
+CLASSES_PATH = os.path.join(_BASE_DIR, "crop_recommendation_classes.pkl")
 
 FEATURE_COLUMNS = ["N", "P", "K", "temperature", "humidity", "ph", "rainfall"]
 

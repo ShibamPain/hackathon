@@ -2,11 +2,49 @@
 # Extends the ML yield prediction with stress modelling, MySQL logging, Fabric
 # submission, sensor ingestion, and the AI-based Crop Recommendation feature.
 
+import os
+import sys
 import logging
 import datetime
-from flask import Flask, jsonify, request
+import csv
+import random
+from pathlib import Path
+
+import requests
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 import joblib
+
+ROOT_DIR = Path(__file__).resolve().parent
+CROPSIM_DIR = ROOT_DIR / "cropSim&crop_recommendation"
+MODELS_DIR = CROPSIM_DIR / "models"
+UTILS_DIR = CROPSIM_DIR / "utils"
+FRONTEND_DIR = ROOT_DIR / "frontend"
+for path in (str(ROOT_DIR), str(CROPSIM_DIR), str(MODELS_DIR), str(UTILS_DIR)):
+    if os.path.isdir(path) and path not in sys.path:
+        sys.path.insert(0, path)
+
+
+def load_env_file(env_path):
+    """Load key=value pairs from a .env file without requiring python-dotenv."""
+    if not env_path or not os.path.exists(env_path):
+        return
+    for raw_line in open(env_path, "r", encoding="utf-8"):
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = [part.strip() for part in line.split("=", 1)]
+        if value and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+load_env_file(ROOT_DIR / ".env")
+load_env_file(FRONTEND_DIR / ".env")
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
 
 from stress_engine import apply_stress_to_yield
 from crop_profiles import DEFAULT_CROP, CROP_PROFILES
@@ -20,11 +58,15 @@ from sensor_validator import validate_sensor_payload
 
 logging.basicConfig(level=logging.INFO)
 
-app = Flask(__name__)
+BASE_DIR = ROOT_DIR
+app = Flask(__name__, static_folder=str(FRONTEND_DIR), static_url_path="")
 CORS(app)  # Allow the frontend (any origin) to talk to this API
 
 # Load the pre-trained RandomForestRegressor (never retrain at runtime)
-model = joblib.load("cropsim_model.pkl")
+MODEL_PATH = MODELS_DIR / "cropsim_model.pkl"
+if not MODEL_PATH.exists():
+    raise FileNotFoundError(f"CropSim model not found at {MODEL_PATH}")
+model = joblib.load(str(MODEL_PATH))
 
 # Ensure both DB tables exist before the first request arrives
 init_db()
@@ -144,8 +186,135 @@ def simulate():
 
 
 # ---------------------------------------------------------------------------
-# Supported crops listing
+# Digital Twin / Crop Simulation endpoint aligned with the frontend contract
 # ---------------------------------------------------------------------------
+
+VALID_SOIL_TYPES = {"Clay": 1.3, "Sandy": 0.7, "Loamy": 1.0}
+
+
+def evaluate_crop_simulation_payload(payload):
+    """Validate and compute a crop simulation result from raw UI inputs."""
+    if not isinstance(payload, dict):
+        raise ValueError("Request body must be a JSON object.")
+
+    required_fields = [
+        "sunlight", "rainfall", "temperature", "soil_type", "irrigation",
+        "fertilizer", "pesticide_applied", "insects"
+    ]
+    missing = [field for field in required_fields if field not in payload or payload[field] is None]
+    if missing:
+        raise ValueError(f"Missing required fields: {', '.join(missing)}")
+
+    soil_type = str(payload["soil_type"]).strip()
+    if soil_type not in VALID_SOIL_TYPES:
+        raise ValueError("soil_type must be one of: Clay, Sandy, Loamy")
+
+    if not isinstance(payload["pesticide_applied"], bool):
+        raise ValueError("pesticide_applied must be a boolean")
+
+    numeric_fields = {
+        "sunlight": (0, 100),
+        "rainfall": (0, 100),
+        "temperature": (0, 50),
+        "irrigation": (0, 100),
+        "fertilizer": (0, 100),
+        "insects": (0, 100),
+    }
+    for field, (low, high) in numeric_fields.items():
+        try:
+            value = float(payload[field])
+        except (TypeError, ValueError):
+            raise ValueError(f"{field} must be numeric") from None
+        if not (low <= value <= high):
+            raise ValueError(f"{field} must be between {low} and {high}")
+        payload[field] = value
+
+    rainfall = float(payload["rainfall"])
+    irrigation = float(payload["irrigation"])
+    sunlight = float(payload["sunlight"])
+    temperature = float(payload["temperature"])
+    fertilizer = float(payload["fertilizer"])
+    insects = float(payload["insects"])
+    pesticide_applied = bool(payload["pesticide_applied"])
+
+    water_multiplier = VALID_SOIL_TYPES[soil_type]
+    total_water = (rainfall + irrigation) * water_multiplier
+    effective_pests = 0 if pesticide_applied else insects
+
+    status_text = "Optimal Conditions: Crop is thriving!"
+    health_score = 100
+    image_filter = "brightness(1) sepia(0) hue-rotate(0deg) grayscale(0)"
+
+    if effective_pests > 60:
+        status_text = "Critical: Severe Pest Attack!"
+        health_score -= 60
+        image_filter = "grayscale(0.8) brightness(0.6)"
+    elif total_water > 130:
+        status_text = f"Warning: Waterlogged! Roots are rotting in {soil_type} soil."
+        health_score -= 40
+        image_filter = "saturate(0.4) sepia(0.5) hue-rotate(-20deg)"
+    elif total_water < 40:
+        status_text = "Warning: Drought! Leaves are drying out."
+        health_score -= 50
+        image_filter = "sepia(0.8) hue-rotate(-30deg) brightness(0.9)"
+    elif temperature > 38:
+        status_text = "Stress: Extreme Heat!"
+        health_score -= 30
+        image_filter = "sepia(0.4) brightness(1.1)"
+    elif sunlight < 30:
+        status_text = "Notice: Low Sunlight. Growth stunted."
+        health_score -= 20
+        image_filter = "brightness(0.7) saturate(0.8)"
+    elif fertilizer > 85:
+        status_text = "Warning: Fertilizer Burn!"
+        health_score -= 25
+        image_filter = "saturate(1.5) hue-rotate(-10deg)"
+
+    return {
+        "inputs": {
+            "sunlight": sunlight,
+            "rainfall": rainfall,
+            "temperature": temperature,
+            "soil_type": soil_type,
+            "irrigation": irrigation,
+            "fertilizer": fertilizer,
+            "pesticide_applied": pesticide_applied,
+            "insects": insects,
+        },
+        "results": {
+            "health_score": max(0, int(round(health_score))),
+            "status_text": status_text,
+            "total_water": round(total_water, 2),
+            "effective_pests": round(effective_pests, 2),
+            "image_filter": image_filter,
+        },
+        "evaluated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+@app.route("/api/crop-simulation/evaluate", methods=["POST"])
+def evaluate_crop_simulation():
+    try:
+        payload = request.get_json(force=True, silent=False)
+        result = evaluate_crop_simulation_payload(payload)
+        return jsonify({"status": "success", **result}), 200
+    except (TypeError, ValueError) as exc:
+        return jsonify({"status": "error", "error": str(exc)}), 400
+
+
+@app.route("/api/crop-simulation/history", methods=["GET"])
+def crop_simulation_history():
+    records = get_simulation_history(limit=20)
+    items = [{
+        "id": item.get("id"),
+        "crop_name": item.get("crop_type"),
+        "location": "Local farm",
+        "health_score": 0,
+        "status_text": "Stored simulation",
+        "evaluated_at": item.get("created_at"),
+    } for item in records]
+    return jsonify({"items": items, "count": len(items)})
+
 
 @app.route("/api/cropsim/crops", methods=["GET"])
 def list_supported_crops():
@@ -318,5 +487,215 @@ def crop_recommendation_full_pipeline():
     })
 
 
+def _read_crop_recommendations():
+    """Compatibility helper for the frontend farm-info UI."""
+    csv_path = os.path.join(ROOT_DIR, "frontend", "crops.csv")
+    if not os.path.exists(csv_path):
+        csv_path = os.path.join(ROOT_DIR, "data", "crops.csv")
+
+    rows = []
+    if os.path.exists(csv_path):
+        with open(csv_path, newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+
+    if not rows:
+        rows = [
+            {"soil_type": "Clay", "crop_name": "Rice", "expected_profit": "₹25,000/acre", "risk_level": "Low"},
+            {"soil_type": "Clay", "crop_name": "Wheat", "expected_profit": "₹18,000/acre", "risk_level": "Medium"},
+            {"soil_type": "Sandy", "crop_name": "Groundnut", "expected_profit": "₹22,000/acre", "risk_level": "Medium"},
+            {"soil_type": "Loamy", "crop_name": "Sugarcane", "expected_profit": "₹35,000/acre", "risk_level": "Low"},
+            {"soil_type": "Red", "crop_name": "Millet", "expected_profit": "₹15,000/acre", "risk_level": "Low"},
+            {"soil_type": "Black", "crop_name": "Soybean", "expected_profit": "₹24,000/acre", "risk_level": "Medium"},
+            {"soil_type": "Alluvial", "crop_name": "Rice", "expected_profit": "₹27,000/acre", "risk_level": "Low"},
+        ]
+
+    return rows
+
+
+@app.route("/api/recommend", methods=["POST"])
+def recommend_compat():
+    """Frontend compatibility endpoint for the Farmer dashboard."""
+    data = request.get_json(force=True, silent=True) or {}
+    soil_type = str(data.get("soil_type", "")).strip()
+    location = str(data.get("location", "")).strip()
+
+    if not soil_type:
+        return jsonify({"error": "soil_type is required"}), 400
+
+    matches = [
+        row for row in _read_crop_recommendations()
+        if str(row.get("soil_type", "")).lower() == soil_type.lower()
+    ]
+
+    return jsonify({
+        "soil_type": soil_type,
+        "location": location,
+        "recommendations": matches,
+    })
+
+
+@app.route("/api/weather", methods=["GET"])
+def weather_compat():
+    """Frontend compatibility endpoint for the Predictor tab."""
+    return jsonify({
+        "rainfall_mm": round(random.uniform(50, 350), 1),
+        "yield_prediction_pct": round(random.uniform(55, 98), 1),
+        "temperature_c": round(random.uniform(22, 42), 1),
+        "humidity_pct": round(random.uniform(40, 95), 1),
+        "soil_ph": round(random.uniform(6.0, 7.5), 2),
+        "season": random.choice(["Kharif", "Rabi", "Zaid"]),
+    })
+
+
+@app.route("/api/forum", methods=["GET"])
+def forum_compat():
+    """Forum data used by the frontend community tab."""
+    if SUPABASE_URL and SUPABASE_KEY:
+        try:
+            resp = requests.get(
+                f"{SUPABASE_URL}/rest/v1/forum_questions?select=*",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json",
+                },
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                rows = resp.json()
+                if rows:
+                    return jsonify(rows)
+        except Exception as exc:
+            logging.warning("Supabase forum fetch failed: %s", exc)
+
+    csv_path = FRONTEND_DIR / "forum.csv"
+    if not csv_path.exists():
+        csv_path = ROOT_DIR / "data" / "forum.csv"
+    if csv_path.exists():
+        with open(csv_path, newline="", encoding="utf-8") as handle:
+            return jsonify(list(csv.DictReader(handle)))
+    return jsonify([])
+
+
+@app.route("/api/retailer/locations", methods=["GET"])
+def retailer_locations_compat():
+    """District/crop dropdowns for the farmer/retailer dashboard."""
+    if SUPABASE_URL and SUPABASE_KEY:
+        try:
+            resp = requests.get(
+                f"{SUPABASE_URL}/rest/v1/wb_crop_data?select=district,crop_name",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json",
+                },
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                rows = resp.json()
+                if rows:
+                    mapping = {}
+                    for row in rows:
+                        district = row.get("district")
+                        crop = row.get("crop_name")
+                        if district and crop:
+                            mapping.setdefault(district, [])
+                            if crop not in mapping[district]:
+                                mapping[district].append(crop)
+                    if mapping:
+                        return jsonify(mapping)
+        except Exception as exc:
+            logging.warning("Supabase retailer locations fetch failed: %s", exc)
+
+    csv_path = FRONTEND_DIR / "crops.csv"
+    if not csv_path.exists():
+        csv_path = ROOT_DIR / "data" / "crops.csv"
+    mapping = {}
+    if csv_path.exists():
+        with open(csv_path, newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                district = row.get("soil_type") or row.get("district")
+                crop = row.get("crop_name")
+                if district and crop:
+                    mapping.setdefault(district, [])
+                    if crop not in mapping[district]:
+                        mapping[district].append(crop)
+    return jsonify(mapping)
+
+
+EXPERT_RESPONSES = [
+    "Based on traditional farming wisdom, rotating crops between legumes and cereals improves soil nitrogen levels significantly. Consider planting moong dal after your wheat harvest.",
+    "For your soil type, I recommend using vermicompost instead of chemical fertilizers. It improves water retention by up to 30% and costs less in the long run.",
+    "The ideal time for sowing Rabi crops in your region is mid-October to November. Make sure to prepare the land with adequate irrigation channels.",
+    "Drip irrigation can reduce your water usage by 40-60% compared to flood irrigation. Government subsidies under PMKSY can cover up to 55% of installation costs.",
+    "Neem-based organic pesticide is very effective against aphids and whiteflies. Mix 5ml neem oil per litre of water and spray early morning for best results.",
+    "To protect crops from unseasonal rain, consider raised-bed farming. It improves drainage and reduces root rot risk substantially.",
+]
+
+
+@app.route("/api/chat", methods=["POST"])
+def chat_compat():
+    """Connect the frontend chatbot and voice assistant to Sarvam AI."""
+    data = request.get_json(force=True, silent=True) or {}
+    message = str(data.get("message", "")).strip()
+    client_key = str(data.get("api_key", "")).strip()
+    active_key = SARVAM_API_KEY or client_key
+
+    if not message:
+        return jsonify({"error": "Message cannot be empty"}), 400
+
+    if active_key:
+        try:
+            resp = requests.post(
+                "https://api.sarvam.ai/v1/chat/completions",
+                headers={
+                    "api-subscription-key": active_key,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "sarvam-105b-conversations",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are AgriChain AI, an expert agricultural advisor for Indian farmers. Provide practical, concise advice in the same language the user asks in (English, Hindi or Bengali).",
+                        },
+                        {"role": "user", "content": message},
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 512,
+                },
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                payload = resp.json()
+                if payload.get("choices"):
+                    choice = payload["choices"][0].get("message", {})
+                    reply = choice.get("content") or choice.get("reasoning_content") or ""
+                    if reply.strip():
+                        return jsonify({"reply": reply.strip(), "source": "sarvam"})
+            logging.warning("Sarvam AI chat failed: %s", resp.text)
+        except Exception as exc:
+            logging.warning("Sarvam AI request error: %s", exc)
+
+    return jsonify({
+        "reply": random.choice(EXPERT_RESPONSES),
+        "source": "expert",
+    })
+
+
+@app.route("/")
+def serve_index():
+    return send_from_directory(str(FRONTEND_DIR), "index.html")
+
+
+@app.route("/<path:filename>")
+def serve_frontend_asset(filename):
+    if filename.startswith("api/"):
+        return jsonify({"error": "Not found"}), 404
+    if os.path.exists(os.path.join(FRONTEND_DIR, filename)):
+        return send_from_directory(FRONTEND_DIR, filename)
+    return jsonify({"error": "File not found"}), 404
+
+
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    app.run(debug=True, host="0.0.0.0", port=8000)
