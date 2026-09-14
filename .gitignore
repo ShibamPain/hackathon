@@ -41,7 +41,7 @@ dist/
 .Trashes
 ehthumbs.db
 Thumbs.db
-
+docs/
 # Hackathon / Data Files (Uncomment to exclude large datasets or models from GitHub)
 # *.csv
 # *.pkl
